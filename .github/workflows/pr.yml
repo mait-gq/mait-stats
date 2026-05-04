@@ -1,0 +1,12 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: mait-gq/mait-library/.github/workflows/dotnet-ci-reusable.yml@main
+    with:
+      dotnet-version: '10.0.x'
+      run-tests: false
