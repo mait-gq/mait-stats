@@ -1,8 +1,10 @@
-FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS base
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.6 AS base
 WORKDIR /app
 EXPOSE 8080
 
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+USER app
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0.6 AS build
 WORKDIR /src
 COPY ["mait.stats.csproj", "."]
 RUN dotnet restore "mait.stats.csproj"
