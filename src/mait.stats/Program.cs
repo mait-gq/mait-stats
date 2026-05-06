@@ -2,6 +2,9 @@
 using Services;
 using Dto;
 using Controllers;
+using Microsoft.Extensions.Http.Resilience;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,23 +16,33 @@ builder.Logging.AddSimpleConsole(options =>
     options.ColorBehavior = Microsoft.Extensions.Logging.Console.LoggerColorBehavior.Enabled;
 });
 
+builder.Services.AddHealthChecks();
+
 builder.Services.AddHttpClient<SerieServiceClient>(client =>
 {
     var options = builder.Configuration.GetSection(nameof(ClientsOptions)).Get<ClientsOptions>();
     client.BaseAddress = new Uri(options!.Series);
-});
+})
+.AddStandardResilienceHandler();
 
 builder.Services.AddHttpClient<DocumentServiceClient>(client =>
 {
     var options = builder.Configuration.GetSection(nameof(ClientsOptions)).Get<ClientsOptions>();
     client.BaseAddress = new Uri(options!.Documents);
+})
+.AddStandardResilienceHandler(o =>
+{
+    o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(90);
+    o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(60);
+    o.Retry.MaxRetryAttempts = 1;
 });
 
 builder.Services.AddHttpClient<FuncionarioServiceClient>(client =>
 {
     var options = builder.Configuration.GetSection(nameof(ClientsOptions)).Get<ClientsOptions>();
     client.BaseAddress = new Uri(options!.Funcionario);
-});
+})
+.AddStandardResilienceHandler();
 
 
 builder.Services.AddOpenApi();
@@ -68,6 +81,16 @@ if (app.Environment.IsDevelopment() || app.Environment.IsStaging())
 
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
 logger.LogInformation("✅ Aplicación iniciada");
+
+app.MapHealthChecks("/healthz/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/healthz/ready", new HealthCheckOptions
+{
+    Predicate = hc => hc.Tags.Contains("ready"),
+});
+app.MapHealthChecks("/healthz", new HealthCheckOptions
+{
+    Predicate = hc => hc.Tags.Contains("ready"),
+});
 
 app.Run();
 
