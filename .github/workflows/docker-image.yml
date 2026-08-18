@@ -1,20 +1,26 @@
+# Avisa al runner para que construya y publique `registry.mait.gq/mait-stats`.
+#
+# La logica esta en `mait-library`, y no copiada aqui, porque esta es la segunda
+# vez que los 26 repos necesitan el mismo cambio en este fichero. Lo que hace, y
+# por que, esta explicado alli:
+# https://github.com/mait-gq/mait-library/blob/main/.github/workflows/avisar-al-runner.yml
+#
+# En corto: `deduplicated: true` ahora es un FALLO —significa «tu push se ha
+# descartado»— y se espera al estado terminal en vez de dar por bueno el 202.
+#
+# El secreto `WEBHOOK_RUNNER_TOKEN` va POR REPOSITORIO: `mait-gq` esta en plan
+# free y ahi los secretos de organizacion solo alcanzan a repos publicos.
+
 name: Publish Docker Image
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: notify hook
-        run: |
-          curl -X POST -H "Content-Type: application/json" \
-          -d '{"appName": "mait-stats", "tag": "latest", "repository": "github.com/melitonio/mait-stats.git"}' \
-          https://web-hook-runner.mait.gq
+  avisar:
+    uses: mait-gq/mait-library/.github/workflows/avisar-al-runner.yml@main
+    with:
+      app: mait-stats
+    secrets:
+      webhook-token: ${{ secrets.WEBHOOK_RUNNER_TOKEN }}
