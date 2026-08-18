@@ -1,26 +1,105 @@
 # Avisa al runner para que construya y publique `registry.mait.gq/mait-stats`.
 #
-# La logica esta en `mait-library`, y no copiada aqui, porque esta es la segunda
-# vez que los 26 repos necesitan el mismo cambio en este fichero. Lo que hace, y
-# por que, esta explicado alli:
-# https://github.com/mait-gq/mait-library/blob/main/.github/workflows/avisar-al-runner.yml
+# 🔴 POR QUE ESTE REPO NO USA EL WORKFLOW REUTILIZABLE DE `mait-library`, Y LOS
+# OTROS 25 SI.
 #
-# En corto: `deduplicated: true` ahora es un FALLO —significa «tu push se ha
-# descartado»— y se espera al estado terminal en vez de dar por bueno el 202.
+# `mait-stats` es el UNICO repositorio PUBLICO de la organizacion, y un repo
+# publico no puede llamar a un workflow reutilizable que vive en uno privado. No
+# falla con un error legible: el workflow **no llega a arrancar** —la ejecucion
+# dura 0 s y no tiene ni un solo job—, asi que en la lista aparece en rojo sin
+# ninguna pista de por que.
 #
-# El secreto `WEBHOOK_RUNNER_TOKEN` va POR REPOSITORIO: `mait-gq` esta en plan
-# free y ahi los secretos de organizacion solo alcanzan a repos publicos.
+# Su `pr.yml` tiene el mismo problema y lleva SIN EJECUTARSE DESDE EL 2026-08-16,
+# que es cuando se le puso el reutilizable. Es decir: este repositorio no se ha
+# construido ni probado en CI desde entonces.
+#
+# Por eso aqui la logica va en linea. Es una copia de
+# `mait-library/.github/workflows/avisar-al-runner.yml` y **hay que mantener las
+# dos a la vez** mientras el repositorio siga siendo publico. Lo que quita la
+# duplicacion no es tocar esto: es decidir si `mait-stats` debe seguir siendo
+# publico —ya esta anotado que ademas comparte la contrasena de la base—.
 
 name: Publish Docker Image
-
 on:
   push:
-    branches: [main]
-
+    branches:
+    - main
 jobs:
   avisar:
-    uses: mait-gq/mait-library/.github/workflows/avisar-al-runner.yml@main
-    with:
-      app: mait-stats
-    secrets:
-      webhook-token: ${{ secrets.WEBHOOK_RUNNER_TOKEN }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+    - name: Encolar la construccion y esperar
+      env:
+        RUNNER: https://web-hook-runner.mait.gq
+        APP: mait-stats
+        TAG: latest
+        REPO: github.com/mait-gq/mait-stats.git
+        ESPERA_MIN: 35
+        TOKEN: ${{ secrets.WEBHOOK_RUNNER_TOKEN }}
+      run: |
+        set -uo pipefail
+
+        # `--user ci:$TOKEN` solo si hay token, y en un array para que la
+        # contrasena no aparezca en ningun `set -x` ni en la linea de orden.
+        AUTH=()
+        if [ -n "${TOKEN:-}" ]; then
+          AUTH=(--user "ci:${TOKEN}")
+          echo "Autenticando como 'ci'."
+        else
+          echo "::warning::Sin webhook-token: la llamada va sin credenciales."
+        fi
+
+        respuesta=$(curl -sS --max-time 60 "${AUTH[@]}" \
+          -X POST -H 'Content-Type: application/json' \
+          -d "{\"appName\": \"${APP}\", \"tag\": \"${TAG}\", \"repository\": \"${REPO}\"}" \
+          -w '\n%{http_code}' "${RUNNER}") || {
+            echo "::error::No se pudo contactar con el runner (${RUNNER})."; exit 1; }
+
+        codigo=$(printf '%s' "$respuesta" | tail -n1)
+        cuerpo=$(printf '%s' "$respuesta" | sed '$d')
+        echo "HTTP ${codigo}: ${cuerpo}"
+
+        if [ "$codigo" = "401" ] || [ "$codigo" = "403" ]; then
+          echo "::error::El runner rechazo la llamada (${codigo}). Si es 401, falta el secreto WEBHOOK_RUNNER_TOKEN en este repositorio; si es 403, 'repository' esta fuera de la lista blanca del runner."
+          exit 1
+        fi
+        case "$codigo" in 2*) ;; *) echo "::error::El runner respondio ${codigo}."; exit 1 ;; esac
+
+        if [ "$(printf '%s' "$cuerpo" | jq -r '.deduplicated // false')" = "true" ]; then
+          echo "::error::ESTE PUSH SE HA DESCARTADO. El runner ya tenia una construccion en vuelo para ${APP}:${TAG}, y deduplica por (app, tag): NO se va a construir nada con este commit. Mirar ${RUNNER}/builds - si hay un registro viejo colgado en 'running', es el caso de T-14."
+          exit 1
+        fi
+
+        id=$(printf '%s' "$cuerpo" | jq -r '.id // empty')
+        [ -n "$id" ] || { echo "::error::El runner no devolvio 'id'."; exit 1; }
+        echo "Construccion encolada: ${id}"
+
+        fin=$(( SECONDS + ESPERA_MIN * 60 ))
+        estado=""
+        while [ $SECONDS -lt $fin ]; do
+          sleep 20
+          listado=$(curl -sS --max-time 60 "${AUTH[@]}" "${RUNNER}/builds") || continue
+          # Si la respuesta no es JSON interpretable —p.ej. el 401 en HTML que
+          # devolveria Caddy si faltara el secreto— NO es que el registro haya
+          # desaparecido. Se reintenta, que para eso esta el plazo.
+          estado=$(printf '%s' "$listado" | jq -r --arg id "$id" \
+            'if type=="array" then . else (.builds // []) end | map(select(.id==$id)) | .[0].status // ""' 2>/dev/null) || {
+              echo "  ... respuesta no interpretable de ${RUNNER}/builds, se reintenta"; continue; }
+          case "$estado" in
+            success)
+              echo "OK: ${APP}:${TAG} construida y publicada."
+              echo "Recordatorio: 'success' no prueba QUE se publico. Si el despliegue importa, comprobar el CONTENIDO de la imagen."
+              exit 0 ;;
+            failed|timeout)
+              echo "::error::La construccion termino en '${estado}'. Log: ${RUNNER}/builds"
+              exit 1 ;;
+            "")
+              echo "::error::El registro ${id} ya no aparece en ${RUNNER}/builds. Con RETENTION los registros viejos se caen solos, asi que no se puede saber como acabo: comprobar el CONTENIDO de la imagen."
+              exit 1 ;;
+          esac
+          echo "  ... ${estado}"
+        done
+
+        echo "::error::Pasados ${ESPERA_MIN} min sigue en '${estado}'. OJO: eso NO significa que no se haya publicado - se han visto registros en 'running' con la imagen ya en el registro. Comprobar POR CONTENIDO antes de relanzar."
+        exit 1
